@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#1f4e79">
 <link rel="icon" href="data:,">
-<title>手機盤點小工具 v2</title>
+<title>手機盤點小工具 v3</title>
 <style>
   :root {
     --bg: #f3f5f8; --card: #fff; --text: #1a1a1a; --muted: #5f6b7a;
@@ -109,11 +109,38 @@
   #last-scan-recon:empty { display: none; }
   li.item.just-ok { animation: justok 1.6s; }
   @keyframes justok { 0%, 60% { background: #c9f2d4; box-shadow: 0 0 0 4px #1e7b34; } 100% { background: var(--card); box-shadow: 0 1px 3px rgba(0,0,0,.08); } }
+  /* v3：搜尋列（捲動清單時固定在頁首下方）＋搜尋結果大顆 ＋1 */
+  #search-bar { position: sticky; top: var(--hdr-h, 0px); z-index: 6; background: var(--card); margin: 0 -14px 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+  #search { font-size: 20px; border: 3px solid var(--primary); -webkit-appearance: none; appearance: none; }
+  #search::-webkit-search-cancel-button { -webkit-appearance: none; display: none; } /* 用自己的大顆 ✕，不要瀏覽器內建的小叉叉 */
+  #search-clear { min-width: 56px; padding: 0; font-size: 22px; background: #e3e9f0; color: var(--primary-d); }
+  #btn-ocr-quick { min-width: 64px; padding: 0; font-size: 26px; }
+  #search-msg { margin-top: 8px; }
+  #search-add { margin-top: 10px; }
+  .item-head { display: flex; gap: 10px; align-items: flex-start; }
+  .item-head .item-main { flex: 1; min-width: 0; }
+  .item-head button.plus1 { min-width: 88px; min-height: 64px; font-size: 26px; padding: 0 8px; background: var(--ok); flex: none; }
+  li.item.compact .qty-row, li.item.compact .item-actions, li.item.compact .time { display: none; }
+  li.item.searchable .item-main { cursor: pointer; }
+  .tap-hint { font-size: 14px; color: var(--muted); }
+  /* v3：拍照辨識確認畫面 */
+  .overlay { position: fixed; inset: 0; z-index: 50; background: rgba(0,0,0,.55); overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .overlay .sheet { background: var(--card); max-width: 720px; margin: 0 auto; min-height: 100%; padding: 14px; padding-top: calc(14px + env(safe-area-inset-top)); padding-bottom: calc(24px + env(safe-area-inset-bottom)); }
+  .overlay h2 { font-size: 20px; margin: 0 0 8px; }
+  #ocr-progress { display: block; }
+  #ocr-img { display: block; max-width: 100%; max-height: 28vh; margin: 10px auto; border-radius: 8px; border: 1px solid var(--border); }
+  #ocr-cands:empty { display: none; }
+  .cand { display: block; width: 100%; text-align: left; margin: 0 0 8px; padding: 8px 12px; background: #e3e9f0; color: var(--text); font-weight: 400; border: 3px solid transparent; }
+  .cand[aria-pressed=true] { border-color: var(--primary); background: #dbe8f6; }
+  .cand .c { font-size: 22px; font-weight: 700; word-break: break-all; }
+  .cand .s { font-size: 15px; color: var(--muted); }
+  #ocr-code { font-size: 26px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+  #ocr-info { font-size: 17px; margin: 0 0 10px; min-height: 1.4em; }
 </style>
 </head>
 <body>
 <header>
-  <h1>手機盤點小工具 v2</h1>
+  <h1>手機盤點小工具 v3</h1>
   <div class="row">
     <div class="grow"><select id="sheet-select" aria-label="目前盤點單"></select></div>
   </div>
@@ -146,6 +173,44 @@
     <div id="import-msg" class="msg"></div>
   </section>
 
+  <section class="card" id="ocr-card">
+    <h2>拍照辨識料號</h2>
+    <p class="hint">拍名牌上的料號文字（例如 K99VN001），辨識後<b>由你確認才 +1</b>。照片只在這支手機上辨識，不會上傳。<br>第一次使用需要網路下載辨識引擎（約 7MB），之後可離線使用。</p>
+    <button id="btn-ocr" class="big">📷 拍照辨識料號</button>
+    <button id="btn-ocr-pick" class="secondary big" style="margin-top:8px">🖼 從相簿選照片</button>
+    <input type="file" id="ocr-file-cam" accept="image/*" capture="environment" hidden>
+    <input type="file" id="ocr-file-pick" accept="image/*" hidden>
+    <div id="ocr-msg" class="msg"></div>
+  </section>
+
+  <section class="card" id="list-card">
+    <h2>品項清單</h2>
+    <div id="search-bar">
+      <div class="row">
+        <div class="grow"><input type="search" id="search" placeholder="🔍 打料號或品名搜尋" aria-label="搜尋料號或品名" autocomplete="off" autocapitalize="characters" enterkeyhint="search"></div>
+        <button id="search-clear" class="secondary" aria-label="清除搜尋" hidden>✕</button>
+        <button id="btn-ocr-quick" aria-label="拍照辨識料號">📷</button>
+      </div>
+      <div id="search-msg" class="msg"></div>
+    </div>
+    <div class="summary" id="summary"></div>
+    <div class="recon-summary" id="recon-summary" hidden></div>
+    <div class="filters" id="filters" role="group" aria-label="篩選對帳狀態" hidden>
+      <button data-f="all" aria-pressed="true">全部</button>
+      <button data-f="none" aria-pressed="false">未盤</button>
+      <button data-f="diff" aria-pressed="false">差異</button>
+      <button data-f="ok" aria-pressed="false">已對</button>
+    </div>
+    <div id="list-msg" class="msg"></div>
+    <div class="grid2" style="margin-bottom:10px">
+      <button id="btn-export" class="secondary">⬇ 匯出 CSV</button>
+      <button id="btn-share" class="secondary">📤 分享 CSV</button>
+    </div>
+    <ul id="items"></ul>
+    <button id="search-add" class="ok big" hidden></button>
+    <button id="btn-clear" class="danger big" style="margin-top:6px">清空這張盤點單</button>
+  </section>
+
   <section class="card" id="scan-card">
     <h2>掃描條碼</h2>
     <button id="btn-scan" class="big">📷 開始掃描</button>
@@ -169,33 +234,30 @@
     <div id="manual-msg" class="msg"></div>
   </section>
 
-  <section class="card" id="list-card">
-    <h2>品項清單</h2>
-    <input type="search" id="search" placeholder="🔍 搜尋條碼／名稱／備註" aria-label="搜尋">
-    <div class="summary" id="summary"></div>
-    <div class="recon-summary" id="recon-summary" hidden></div>
-    <div class="filters" id="filters" role="group" aria-label="篩選對帳狀態" hidden>
-      <button data-f="all" aria-pressed="true">全部</button>
-      <button data-f="none" aria-pressed="false">未盤</button>
-      <button data-f="diff" aria-pressed="false">差異</button>
-      <button data-f="ok" aria-pressed="false">已對</button>
-    </div>
-    <div id="list-msg" class="msg"></div>
-    <div class="grid2" style="margin-bottom:10px">
-      <button id="btn-export" class="secondary">⬇ 匯出 CSV</button>
-      <button id="btn-share" class="secondary">📤 分享 CSV</button>
-    </div>
-    <ul id="items"></ul>
-    <button id="btn-clear" class="danger big" style="margin-top:6px">清空這張盤點單</button>
-  </section>
-
   <section class="card" id="settings-card">
     <h2>設定</h2>
     <label class="toggle"><input type="checkbox" id="set-sound"> 掃描成功播放提示音</label>
     <label class="toggle"><input type="checkbox" id="set-vibrate"> 掃描成功震動（iPhone 不支援）</label>
   </section>
-  <footer>資料只存在這支手機的瀏覽器裡，不會上傳。清除瀏覽器資料會一併刪除。<br>掃碼函式庫：ZXing（Apache-2.0）</footer>
+  <footer>資料與照片只在這支手機的瀏覽器裡處理，不會上傳。清除瀏覽器資料會一併刪除。<br>掃碼函式庫：ZXing（Apache-2.0）｜文字辨識：Tesseract.js（Apache-2.0）</footer>
 </main>
+
+<div id="ocr-dialog" class="overlay" role="dialog" aria-modal="true" aria-labelledby="ocr-title" hidden>
+  <div class="sheet">
+    <h2 id="ocr-title">確認料號</h2>
+    <div id="ocr-progress" class="msg info"></div>
+    <img id="ocr-img" alt="拍到的照片">
+    <div id="ocr-cands" role="group" aria-label="辨識候選"></div>
+    <label class="field"><span>料號（可直接改字）</span>
+      <input type="text" id="ocr-code" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done"></label>
+    <div id="ocr-info"></div>
+    <button id="ocr-confirm" class="ok big">✓ 確認計數 +1</button>
+    <div class="grid2" style="margin-top:8px">
+      <button id="ocr-retake" class="secondary">📷 重拍</button>
+      <button id="ocr-cancel" class="secondary">取消</button>
+    </div>
+  </div>
+</div>
 
 <script>
 /* @zxing/library 0.21.3 — Apache License 2.0 — https://github.com/zxing-js/library */
@@ -377,13 +439,14 @@
   }
   var filter = 'all';
 
+  var expanded = {}; // v3：搜尋結果中被點開編輯的品項
+  // 搜尋比對：料號子字串、品名／備註關鍵字，不分大小寫
+  function matchQ(it, q) { return (it.code + '\n' + it.name + '\n' + it.note).toLowerCase().indexOf(q) !== -1; }
   function renderItems() {
     var sheet = current();
     var q = $('search').value.trim().toLowerCase();
     var list = sheet.items.slice().sort(function (a, b) { return b.lastScan - a.lastScan; });
-    var shown = q ? list.filter(function (it) {
-      return (it.code + '\n' + it.name + '\n' + it.note).toLowerCase().indexOf(q) !== -1;
-    }) : list;
+    var shown = q ? list.filter(function (it) { return matchQ(it, q); }) : list;
     var total = sheet.items.reduce(function (a, b) { return a + b.qty; }, 0);
     var rec = sheet.hasExpected;
     $('filters').hidden = !rec; $('recon-summary').hidden = !rec;
@@ -399,21 +462,33 @@
     }
     $('summary').textContent = '共 ' + sheet.items.length + ' 項、' + total + ' 件' +
       (q || (rec && filter !== 'all') ? '；顯示 ' + shown.length + ' 項' : '');
+    // v3：搜尋框 —— 清除鈕、整張單都找不到時顯示「新增這個料號」
+    var rawQ = $('search').value.trim();
+    $('search-clear').hidden = !$('search').value;
+    var anyMatch = !q || sheet.items.some(function (it) { return matchQ(it, q); });
+    $('search-add').hidden = anyMatch;
+    if (!anyMatch) $('search-add').textContent = '＋ 新增這個料號：' + rawQ + '（+1）';
     if (!shown.length) {
-      $('items').innerHTML = '<li class="empty">' + (q ? '找不到符合的品項' : rec && filter !== 'all' ? '沒有「' + ST_LABEL[filter] + '」的品項' : '還沒有品項，掃描或手動新增吧') + '</li>';
+      $('items').innerHTML = '<li class="empty">' + (q ? (anyMatch ? '目前篩選「' + ST_LABEL[filter] + '」裡沒有符合的品項（按「全部」看全部）' : '找不到符合的品項：「' + esc(rawQ) + '」') : rec && filter !== 'all' ? '沒有「' + ST_LABEL[filter] + '」的品項' : '還沒有品項，掃描或手動新增吧') + '</li>';
       return;
     }
     $('items').innerHTML = shown.map(function (it) {
       var c = esc(it.code);
       var st = statusOf(sheet, it);
+      // 搜尋中：每筆結果精簡顯示＋右側大顆 ＋1；點品項本體展開原本的編輯方式
+      var compact = q && !expanded[it.code];
       return '<li class="item' + (it.code === lastTouched ? ' recent' : '') + (st ? ' st-' + st : '') + (st && it.code === justOk ? ' just-ok' : '') +
+        (q ? ' searchable' : '') + (compact ? ' compact' : '') +
         '" data-code="' + c + '"' + (st ? ' data-status="' + st + '"' : '') + '>' +
+        (q ? '<div class="item-head"><div class="item-main" data-act="toggle">' : '') +
         '<div class="code">' + c + '</div>' +
         (st ? '<span class="badge st-' + st + '">' + badgeText(sheet, it) + '</span>' +
           (st === 'out' ? '<div class="recon">不在匯入的盤點表；實盤 <b>' + it.qty + '</b></div>'
             : '<div class="recon">應盤 <b>' + it.expected + '</b>｜實盤 <b>' + it.qty + '</b>｜差異 <b class="' + (it.qty - it.expected < 0 ? 'neg' : it.qty - it.expected > 0 ? 'pos' : '') + '">' + signed(it.qty - it.expected) + '</b></div>') : '') +
         (it.name ? '<div class="name">' + esc(it.name) + '</div>' : '') +
         (it.note ? '<div class="note">備註：' + esc(it.note) + '</div>' : '') +
+        (q ? '<div class="tap-hint">' + (compact ? '點這裡改數量／名稱 ▾' : '點這裡收合 ▴') + '</div></div>' +
+          '<button class="plus1" data-act="inc1" aria-label="' + c + ' 加 1">＋1</button></div>' : '') +
         '<div class="time">最後掃描：' + (it.lastScan ? fmtDate(new Date(it.lastScan)) : '—') + '</div>' +
         '<div class="qty-row">' +
           '<button class="secondary" data-act="dec" aria-label="減 1">−1</button>' +
@@ -434,13 +509,18 @@
 
   // ---------- 品項操作 ----------
   $('items').addEventListener('click', function (e) {
-    var btn = e.target.closest('button[data-act]');
+    var btn = e.target.closest('button[data-act]') || e.target.closest('[data-act="toggle"]');
     if (!btn) return;
     var li = btn.closest('li.item'); var code = li.getAttribute('data-code');
     var sheet = current(); var item = findItem(sheet, code);
     if (!item) return;
     var act = btn.getAttribute('data-act');
-    if (act === 'inc' || act === 'dec') {
+    if (act === 'toggle') {          // v3：搜尋結果點品項本體 → 展開／收合原本的編輯方式
+      if (expanded[code]) delete expanded[code]; else expanded[code] = true;
+      renderItems();
+    } else if (act === 'inc1') {     // v3：搜尋結果的大顆 ＋1（回饋比照掃描）
+      countOne(code, ['search-msg']);
+    } else if (act === 'inc' || act === 'dec') {
       var before = statusOf(sheet, item);
       item.qty = Math.max(0, item.qty + (act === 'inc' ? 1 : -1));
       save(); lastTouched = code; listRecon(item, before, 'list-msg'); renderAll();
@@ -518,7 +598,41 @@
     if (!confirm('確定清空「' + s.name + '」的全部 ' + s.items.length + ' 個品項？無法復原。')) return;
     s.items = []; save(); renderAll();
   });
-  $('search').addEventListener('input', renderItems);
+  $('search').addEventListener('input', function () {
+    // 在長清單下方打字時，篩選後清單變短、頁面會往上跳：把清單卡片頂端對齊頁首，搜尋框與結果保持在畫面上
+    var hdr = document.querySelector('header').offsetHeight, wasStuck = $('list-card').getBoundingClientRect().top < hdr;
+    renderItems();
+    if (wasStuck) window.scrollTo(0, $('list-card').getBoundingClientRect().top + window.pageYOffset - hdr);
+  });
+
+  // ---------- 打字搜尋計數（v3） ----------
+  // 計數 +1，回饋比照 v2 掃描（已對 ✓／超過應盤 ⚠／清單外 ⚠ 的提示、音效、品項醒目標示）
+  function countOne(code, msgIds) {
+    var sheet = current(), prev = findItem(sheet, code);
+    var before = prev ? statusOf(sheet, prev) : null;
+    var item = addQty(code, 1);
+    lastTouched = code;
+    var info = reconInfo(sheet, item, before);
+    var kind = info && (info.kind === 'match' || info.kind === 'warn') ? info.kind : 'normal';
+    feedback(kind);
+    if (kind === 'match') markJustOk(code);
+    var text = (prev ? '已 +1：' : '已新增：') + code + '，目前數量 ' + item.qty + (info ? '\n' + info.text : '');
+    (msgIds || []).forEach(function (id) { showMsg(id, kind === 'normal' ? 'ok' : kind, text, 5000); });
+    renderAll();
+    return item;
+  }
+  $('search-clear').addEventListener('click', function () {
+    $('search').value = ''; expanded = {}; renderItems(); $('search').focus();
+  });
+  $('search').addEventListener('keydown', function (e) { if (e.key === 'Enter') this.blur(); });
+  $('search-add').addEventListener('click', function () {
+    var code = $('search').value.trim();
+    if (!code) return;
+    countOne(code, ['search-msg']);   // 比照手動新增：不在匯入清單 → 清單外；沒匯入的單 → 一般品項
+  });
+  function syncHeaderHeight() { document.documentElement.style.setProperty('--hdr-h', document.querySelector('header').offsetHeight + 'px'); }
+  window.addEventListener('resize', syncHeaderHeight);
+  syncHeaderHeight();
 
   // ---------- CSV ----------
   function csvCell(v) {
@@ -827,6 +941,261 @@
   }
   $('btn-scan').addEventListener('click', function () { scanning ? stopScan() : startScan(); });
   document.addEventListener('visibilitychange', function () { if (document.hidden && scanning) stopScan(); });
+
+  // ---------- 拍照辨識料號（v3，OCR） ----------
+  // 引擎 Tesseract.js 與 eng 語言資料自托管在 ocr/（不連外部 CDN）；第一次按「拍照辨識」才載入，主頁面不受影響。
+  // 照片只在本機辨識，不上傳。
+  function ocrUrl(p) { return new URL('ocr/' + p, location.href).href; } // worker 內部以 worker 檔位置解析相對路徑，所以這裡轉成絕對網址
+  var ocr = { worker: null, promise: null };
+  var OCR_STATUS = {
+    'loading tesseract core': '載入辨識引擎', 'initializing tesseract': '啟動辨識引擎', 'initialized tesseract': '啟動辨識引擎',
+    'loading language traineddata': '載入英數字型資料', 'loaded language traineddata': '載入英數字型資料',
+    'initializing api': '準備辨識', 'initialized api': '準備辨識', 'recognizing text': '辨識文字中'
+  };
+  var ocrLog = [];
+  function onOcrLog(m) {
+    if (!m || !m.status) return;
+    ocrLog.push(m.status);
+    if ($('ocr-dialog').hidden || !ocrBusy) return;
+    var label = OCR_STATUS[m.status] || m.status;
+    var pct = typeof m.progress === 'number' ? Math.round(m.progress * 100) : null;
+    setOcrProgress('info', '⏳ ' + label + '…' + (pct != null ? ' ' + pct + '%' : '') + (ocr.worker ? '' : '\n第一次使用需要網路下載辨識引擎（約 7MB），請稍候。'));
+  }
+  function loadScript(src) {
+    return new Promise(function (res, rej) {
+      var s = document.createElement('script'); s.src = src; s.onload = res;
+      s.onerror = function () { rej(new Error('無法下載 ' + src)); };
+      document.head.appendChild(s);
+    });
+  }
+  function ensureEngine() {
+    if (ocr.promise) return ocr.promise;
+    ocr.promise = (window.Tesseract ? Promise.resolve() : loadScript('ocr/tesseract.min.js')).then(function () {
+      return window.Tesseract.createWorker('eng', 1, {           // 1 = LSTM 引擎
+        workerPath: ocrUrl('worker.min.js'), corePath: ocrUrl('core'), langPath: ocrUrl('lang'),
+        workerBlobURL: false, cacheMethod: 'none', logger: onOcrLog   // 快取交給 sw.js（ocr/ 檔案快取優先）
+      });
+    }).then(function (w) {
+      // 只認大寫英數與連字號（空白、/、: 用來把「P/N: 料號」切開）；11 = 名牌上零散文字；固定 DPI、除錯訊息導到 /dev/null，避免引擎在 console 印診斷訊息
+      return w.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- /:', tessedit_pageseg_mode: '11', user_defined_dpi: '300', debug_file: '/dev/null' }).then(function () { ocr.worker = w; return w; });
+    }).catch(function (err) {
+      ocr.promise = null;                                        // 下次再按會重試（例如剛恢復網路）
+      var e = new Error(err && err.message ? err.message : String(err)); e.stage = 'load'; throw e;
+    });
+    return ocr.promise;
+  }
+
+  // 候選料號：先抽出英數與連字號組成、長度 ≥4 的字串，再「吸附」到目前盤點單裡真的存在的料號
+  var OCR_FOLD = { O: '0', Q: '0', D: '0', I: '1', L: '1', S: '5', B: '8', Z: '2', G: '6' }; // OCR 常見混淆字
+  function fold(s) { return s.replace(/[OQDILSBZG]/g, function (c) { return OCR_FOLD[c]; }); }
+  // 編輯距離：多一個／少一個字（引擎常在 0 旁邊多認一個 O）算 0.8，認錯字算 1
+  function lev(a, b) {
+    var m = a.length, n = b.length, prev = [], cur, i, j, ID = 0.8;
+    for (j = 0; j <= n; j++) prev[j] = j * ID;
+    for (i = 1; i <= m; i++) {
+      cur = [i * ID];
+      for (j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + ID, cur[j - 1] + ID, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = cur;
+    }
+    return prev[n];
+  }
+  function ocrTokens(text, noJoin) {
+    var out = [], seen = {};
+    function add(t) { t = t.replace(/^-+|-+$/g, ''); if (t.length >= 4 && !seen[t]) { seen[t] = true; out.push(t); } }
+    String(text || '').toUpperCase().split(/\r?\n/).forEach(function (line) {
+      var parts = line.match(/[A-Z0-9-]+/g) || [];
+      parts.forEach(add);
+      if (noJoin) return;
+      // 辨識有時會把一個料號拆成兩三段（多插空白），把同一行相鄰片段接起來也拿來跟清單比對
+      for (var i = 0; i < parts.length; i++) {
+        var j2 = parts[i] + (parts[i + 1] || ''), j3 = j2 + (parts[i + 2] || '');
+        if (parts[i + 1]) add(j2);
+        if (parts[i + 2]) add(j3);
+      }
+    });
+    return out;
+  }
+  // 分數越小越像：0 完全相同／0.5 只差混淆字／1 包含料號（前後黏到別的字）／1+距離 編輯距離相近
+  function scorePair(t, code) {
+    var k = code.toUpperCase().replace(/\s+/g, '');
+    if (k.length < 3) return null;
+    if (t === k) return 0;
+    var tf = fold(t), kf = fold(k);
+    if (tf === kf) return 0.5;
+    if (tf.indexOf(kf) >= 0) return 1;
+    var maxD = k.length <= 5 ? 1 : k.length <= 9 ? 2.2 : 3.2;
+    var best = lev(tf, kf);
+    if (tf.length > kf.length) {          // 前後黏了別的字：拿長度相近的片段比
+      for (var len = kf.length - 1; len <= kf.length + 1; len++)
+        for (var s = 0; s + len <= tf.length; s++) best = Math.min(best, lev(tf.substr(s, len), kf) + 0.25);
+    }
+    return best <= maxD ? 1 + best : null;
+  }
+  // texts：每一次辨識（不同縮放）的文字；同一料號取最好的分數，分數相同時被越多次辨識認到的排前面
+  function ocrCandidates(texts, sheet) {
+    if (!Array.isArray(texts)) texts = [texts];
+    var passes = texts.map(ocrTokens), res = [];
+    sheet.items.forEach(function (it, idx) {
+      var best = null, hits = 0;
+      passes.forEach(function (toks) {
+        var pb = null;
+        toks.forEach(function (t) { var sc = scorePair(t, it.code); if (sc != null && (pb == null || sc < pb)) pb = sc; });
+        if (pb != null) { hits++; if (best == null || pb < best) best = pb; }
+      });
+      if (best != null) res.push({ code: it.code, score: best, hits: hits, idx: idx, inSheet: true });
+    });
+    res.sort(function (a, b) { return a.score - b.score || b.hits - a.hits || a.idx - b.idx; });
+    res = res.slice(0, 3);
+    if (!res.length || res[0].score > 1) {
+      // 清單裡沒有夠像的（或沒匯入清單）：補上照片裡看起來像料號的字串。
+      // 料號是英數混合：同時有英文和數字的優先，純數字（≥5 碼）其次，純英文（多半是別的字或雜訊）不列。
+      var kind = function (t) { return /[A-Z]/.test(t) && /[0-9]/.test(t) ? 0 : /^[0-9-]{5,}$/.test(t) ? 1 : 9; };
+      var raw = [];
+      texts.forEach(function (tx) { ocrTokens(tx, true).forEach(function (t) {   // 這裡不用相鄰片段接起來的字串（容易拼出假料號）
+        if (kind(t) > 1) return;
+        // 引擎常把數字串裡的 0 認成 O 或在 0 前多認一個 O：先列修正版，原字串也留著讓人選
+        var fixed = t.replace(/O(?=0)/g, '').replace(/O(?=[0-9])/g, '0').replace(/([0-9])O/g, '$10');
+        if (fixed !== t && fixed.length >= 4) raw.push(fixed);
+        raw.push(t);
+      }); });
+      raw.sort(function (a, b) { return kind(a) - kind(b); })   // 穩定排序：同類保持辨識順序
+        .forEach(function (t) {
+          if (res.length >= 3) return;
+          if (res.some(function (r) { return r.code.toUpperCase() === t; })) return;
+          if (findCodeCI(sheet, t)) return;
+          res.push({ code: t, score: 9, inSheet: false });
+        });
+    }
+    return res;
+  }
+  function findCodeCI(sheet, code) {
+    var u = code.toUpperCase();
+    return findItem(sheet, code) || sheet.items.filter(function (it) { return it.code.toUpperCase() === u; })[0] || null;
+  }
+  window.__inventory.countOne = countOne; // 測試用
+  window.__inventory.ocrCandidates = function (text) { return ocrCandidates(text, current()); }; // 測試用
+
+  // 確認畫面
+  var ocrJob = 0, ocrBusy = false, ocrImgUrl = null, lastOcr = null;
+  window.__inventory.lastOcr = function () { return lastOcr; }; // 測試用
+  function setOcrProgress(kind, text) { var el = $('ocr-progress'); el.className = 'msg show ' + kind; el.textContent = text; }
+  function itemSummary(sheet, it) {
+    var st = statusOf(sheet, it);
+    return (it.name ? it.name + '｜' : '') + (st && st !== 'out' ? '應盤 ' + it.expected + '／實盤 ' + it.qty + '｜' + badgeText(sheet, it) : st === 'out' ? '清單外｜實盤 ' + it.qty : '目前數量 ' + it.qty);
+  }
+  function ocrInfo() {
+    var sheet = current(), v = $('ocr-code').value.trim(), it = v ? findCodeCI(sheet, v) : null;
+    $('ocr-info').textContent = !v ? '請輸入或選擇料號' : it ? '→ ' + it.code + '：' + itemSummary(sheet, it)
+      : sheet.hasExpected ? '→ 不在盤點清單：確認後會新增為「清單外」' : '→ 新料號：確認後新增，數量 1';
+    $('ocr-confirm').disabled = !v;
+    Array.prototype.forEach.call($('ocr-cands').querySelectorAll('.cand'), function (b) {
+      b.setAttribute('aria-pressed', String(b.getAttribute('data-code').toUpperCase() === v.toUpperCase()));
+    });
+  }
+  function showCandidates(texts) {
+    var sheet = current(), cands = ocrCandidates(texts, sheet);
+    lastOcr = { text: texts.join('\n---\n'), passes: texts.length, candidates: cands };
+    $('ocr-cands').innerHTML = cands.map(function (c, i) {
+      var it = findItem(sheet, c.code);
+      return '<button class="cand" data-code="' + esc(c.code) + '" aria-pressed="false"><div class="c">' + (i + 1) + '. ' + esc(c.code) + '</div><div class="s">' +
+        esc(it ? itemSummary(sheet, it) : '照片裡的字（不在' + (sheet.items.length ? '這張單' : '清單') + '）') + '</div></button>';
+    }).join('');
+    $('ocr-code').value = cands.length ? cands[0].code : '';
+    if (cands.length) setOcrProgress('info', '辨識完成：請確認料號正確再按「確認計數」。認錯可點其他候選、直接改字或重拍。');
+    else setOcrProgress('err', '沒有辨識出料號。請直接在下方輸入料號，或重拍（靠近一點、正對名牌、避免反光）。');
+    ocrInfo();
+    if (!cands.length) $('ocr-code').focus();
+  }
+  function loadImg() {
+    return new Promise(function (res, rej) {
+      var img = new Image();
+      img.onload = function () { res(img); };
+      img.onerror = function () { rej(new Error('照片無法讀取')); };
+      img.src = ocrImgUrl;
+    });
+  }
+  // 手機原圖（3000–4000px）直接辨識很慢、而且字太大反而容易認錯：先縮到長邊 1000px 認一次，
+  // 沒有跟清單「完全相同」的結果時再用長邊 1600px 認第二次，兩次的結果合併排序。
+  var OCR_SIZES = [1000, 1600];
+  function canvasAt(img, longSide) {
+    var w = img.naturalWidth, h = img.naturalHeight, sc = Math.min(longSide / Math.max(w, h), 2);
+    var cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(w * sc)); cv.height = Math.max(1, Math.round(h * sc));
+    var cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(img, 0, 0, cv.width, cv.height);
+    return cv;
+  }
+  function goodEnough(cands, sheet) {
+    if (!cands.length) return false;
+    return cands[0].inSheet ? cands[0].score === 0 : !sheet.items.length;
+  }
+  function openOcrDialog() {
+    $('ocr-dialog').hidden = false; document.body.style.overflow = 'hidden';
+  }
+  function closeOcrDialog() {
+    ocrJob++; ocrBusy = false;
+    $('ocr-dialog').hidden = true; document.body.style.overflow = '';
+    if (ocrImgUrl) { URL.revokeObjectURL(ocrImgUrl); ocrImgUrl = null; }
+    $('ocr-img').removeAttribute('src');
+  }
+  function handlePhoto(file) {
+    if (!file) return;
+    var job = ++ocrJob;
+    if (ocrImgUrl) URL.revokeObjectURL(ocrImgUrl);
+    ocrImgUrl = URL.createObjectURL(file);
+    $('ocr-img').src = ocrImgUrl;
+    $('ocr-cands').innerHTML = ''; $('ocr-code').value = ''; lastOcr = null;
+    ocrInfo(); openOcrDialog(); ocrBusy = true;
+    setOcrProgress('info', ocr.worker ? '⏳ 辨識文字中…' : '⏳ 載入辨識引擎…\n第一次使用需要網路下載辨識引擎（約 7MB），請稍候。');
+    Promise.all([ensureEngine(), loadImg()]).then(function (r) {
+      var w = r[0], img = r[1], texts = [];
+      function pass(i) {
+        if (job !== ocrJob) return;
+        setOcrProgress('info', '⏳ 辨識文字中…' + (i ? '（換個大小再認一次）' : ''));
+        return w.recognize(canvasAt(img, OCR_SIZES[i])).then(function (out) {
+          if (job !== ocrJob) return;
+          texts.push(out.data.text);
+          if (i + 1 < OCR_SIZES.length && !goodEnough(ocrCandidates(texts, current()), current())) return pass(i + 1);
+          ocrBusy = false; showCandidates(texts);
+        });
+      }
+      return pass(0);
+    }).catch(function (err) {
+      if (job !== ocrJob) return;
+      ocrBusy = false;
+      setOcrProgress('err', '⚠ ' + (err && err.stage === 'load'
+        ? '辨識引擎載入失敗' + (navigator.onLine === false ? '（目前沒有網路；第一次使用需要網路下載引擎）' : '') + '：' + err.message
+        : '辨識失敗：' + (err && err.message ? err.message : err)) + '\n可以直接在下方輸入料號後按「確認計數」，或重拍。');
+      lastOcr = { error: String(err && err.message || err) };
+      $('ocr-code').focus();
+    });
+  }
+  function pickPhoto(inputId) {
+    ensureEngine().catch(function () {});   // 使用者在拍照時，引擎先在背景載入
+    var inp = $(inputId); inp.value = ''; inp.click();
+  }
+  $('btn-ocr').addEventListener('click', function () { pickPhoto('ocr-file-cam'); });
+  $('btn-ocr-quick').addEventListener('click', function () { pickPhoto('ocr-file-cam'); });
+  $('btn-ocr-pick').addEventListener('click', function () { pickPhoto('ocr-file-pick'); });
+  $('ocr-retake').addEventListener('click', function () { pickPhoto('ocr-file-cam'); });
+  ['ocr-file-cam', 'ocr-file-pick'].forEach(function (id) {
+    $(id).addEventListener('change', function () { handlePhoto(this.files && this.files[0]); });
+  });
+  $('ocr-cands').addEventListener('click', function (e) {
+    var b = e.target.closest('.cand'); if (!b) return;
+    $('ocr-code').value = b.getAttribute('data-code'); ocrInfo();
+  });
+  $('ocr-code').addEventListener('input', ocrInfo);
+  $('ocr-code').addEventListener('keydown', function (e) { if (e.key === 'Enter') this.blur(); });
+  $('ocr-cancel').addEventListener('click', closeOcrDialog);
+  $('ocr-confirm').addEventListener('click', function () {
+    var v = $('ocr-code').value.trim();
+    if (!v) { ocrInfo(); return; }
+    var it = findCodeCI(current(), v);
+    var code = it ? it.code : v.toUpperCase();   // 大小寫不同但同料號 → 計到原品項；新料號一律大寫
+    closeOcrDialog();
+    countOne(code, ['search-msg', 'ocr-msg']);
+    var li = $('items').querySelector('li.item[data-code="' + (window.CSS && CSS.escape ? CSS.escape(code) : code) + '"]');
+    (li || $('list-card')).scrollIntoView({ block: 'center' });
+  });
 
   // ---------- 啟動 ----------
   if (!libReady()) showMsg('scan-msg', 'err', '⚠ 掃描函式庫載入失敗，相機掃描無法使用。請改用下方「手動新增」。');
