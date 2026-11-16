@@ -130,6 +130,8 @@
   #ocr-progress { display: block; }
   #ocr-img { display: block; max-width: 100%; max-height: 28vh; margin: 10px auto; border-radius: 8px; border: 1px solid var(--border); }
   #ocr-cands:empty { display: none; }
+  #ocr-raw { font-size: 16px; margin: 0 0 8px; color: var(--muted); word-break: break-all; }
+  #ocr-raw b { color: var(--text); font-size: 19px; letter-spacing: 1px; }
   .cand { display: block; width: 100%; text-align: left; margin: 0 0 8px; padding: 8px 12px; background: #e3e9f0; color: var(--text); font-weight: 400; border: 3px solid transparent; }
   .cand[aria-pressed=true] { border-color: var(--primary); background: #dbe8f6; }
   .cand .c { font-size: 22px; font-weight: 700; word-break: break-all; }
@@ -140,7 +142,7 @@
 </head>
 <body>
 <header>
-  <h1>手機盤點小工具 v3</h1>
+  <h1>手機盤點小工具 v3.1</h1>
   <div class="row">
     <div class="grow"><select id="sheet-select" aria-label="目前盤點單"></select></div>
   </div>
@@ -247,6 +249,7 @@
     <h2 id="ocr-title">確認料號</h2>
     <div id="ocr-progress" class="msg info"></div>
     <img id="ocr-img" alt="拍到的照片">
+    <div id="ocr-raw" hidden></div>
     <div id="ocr-cands" role="group" aria-label="辨識候選"></div>
     <label class="field"><span>料號（可直接改字）</span>
       <input type="text" id="ocr-code" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done"></label>
@@ -968,6 +971,7 @@
       document.head.appendChild(s);
     });
   }
+  var OCR_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 ', OCR_PSM = '6';   // 空白是分字用：拿掉的話引擎會把整行黏成一個字、信心值變 0（2026-11-16 實測）
   function ensureEngine() {
     if (ocr.promise) return ocr.promise;
     ocr.promise = (window.Tesseract ? Promise.resolve() : loadScript('ocr/tesseract.min.js')).then(function () {
@@ -976,8 +980,8 @@
         workerBlobURL: false, cacheMethod: 'none', logger: onOcrLog   // 快取交給 sw.js（ocr/ 檔案快取優先）
       });
     }).then(function (w) {
-      // 只認大寫英數與連字號（空白、/、: 用來把「P/N: 料號」切開）；11 = 名牌上零散文字；固定 DPI、除錯訊息導到 /dev/null，避免引擎在 console 印診斷訊息
-      return w.setParameters({ tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789- /:', tessedit_pageseg_mode: '11', user_defined_dpi: '300', debug_file: '/dev/null' }).then(function () { ocr.worker = w; return w; });
+      // v3.1：只認 A–Z、0–9＋空白（料號格式；連字號比對時本來就忽略）；PSM 6 = 單一文字區塊（前處理已裁到名牌文字區）；固定 DPI、除錯訊息導到 /dev/null
+      return w.setParameters({ tessedit_char_whitelist: OCR_WHITELIST, tessedit_pageseg_mode: OCR_PSM, user_defined_dpi: '300', debug_file: '/dev/null' }).then(function () { ocr.worker = w; return w; });
     }).catch(function (err) {
       ocr.promise = null;                                        // 下次再按會重試（例如剛恢復網路）
       var e = new Error(err && err.message ? err.message : String(err)); e.stage = 'load'; throw e;
@@ -985,12 +989,15 @@
     return ocr.promise;
   }
 
-  // 候選料號：先抽出英數與連字號組成、長度 ≥4 的字串，再「吸附」到目前盤點單裡真的存在的料號
-  var OCR_FOLD = { O: '0', Q: '0', D: '0', I: '1', L: '1', S: '5', B: '8', Z: '2', G: '6' }; // OCR 常見混淆字
+  // 候選料號（v3.1：清單模糊比對）：先抽出英數組成、長度 ≥4 的字串，再跟目前盤點單的「全部」料號算相似度排名。
+  // 正規化：轉大寫、去掉空白與連字號，OCR 常見混淆字視為同一字（0↔O、1↔I↔l、5↔S、8↔B、2↔Z、6↔G，另 Q/D 也常被認成 0）。
+  var OCR_FOLD = { O: '0', Q: '0', D: '0', I: '1', L: '1', S: '5', B: '8', Z: '2', G: '6' };
   function fold(s) { return s.replace(/[OQDILSBZG]/g, function (c) { return OCR_FOLD[c]; }); }
-  // 編輯距離：多一個／少一個字（引擎常在 0 旁邊多認一個 O）算 0.8，認錯字算 1
-  function lev(a, b) {
-    var m = a.length, n = b.length, prev = [], cur, i, j, ID = 0.8;
+  function normCode(s) { return fold(String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '')); }
+  var OCR_MAX_DIST = 2;   // 正規化後編輯距離 ≤2 才算「可能命中」
+  // 編輯距離。w=true 時多一個／少一個字算 0.8、認錯字算 1（只用來排名次：引擎常在 0 旁邊多認一個 O）；w=false 為標準 Levenshtein（判斷 ≤2 用）
+  function lev(a, b, w) {
+    var m = a.length, n = b.length, prev = [], cur, i, j, ID = w ? 0.8 : 1;
     for (j = 0; j <= n; j++) prev[j] = j * ID;
     for (i = 1; i <= m; i++) {
       cur = [i * ID];
@@ -1015,58 +1022,72 @@
     });
     return out;
   }
-  // 分數越小越像：0 完全相同／0.5 只差混淆字／1 包含料號（前後黏到別的字）／1+距離 編輯距離相近
+  // 一個 OCR 字串對一個料號：回傳 { score, dist } 或 null。score 越小越像（排名用）：
+  // 0 完全相同／0.5 只差混淆字或連字號／1 包含料號（前後黏到別的字）／1+距離 編輯距離 ≤2
   function scorePair(t, code) {
-    var k = code.toUpperCase().replace(/\s+/g, '');
+    var k = String(code).toUpperCase().replace(/\s+/g, '');
     if (k.length < 3) return null;
-    if (t === k) return 0;
-    var tf = fold(t), kf = fold(k);
-    if (tf === kf) return 0.5;
-    if (tf.indexOf(kf) >= 0) return 1;
-    var maxD = k.length <= 5 ? 1 : k.length <= 9 ? 2.2 : 3.2;
-    var best = lev(tf, kf);
-    if (tf.length > kf.length) {          // 前後黏了別的字：拿長度相近的片段比
+    if (t === k) return { score: 0, dist: 0 };
+    var tf = normCode(t), kf = normCode(k);
+    if (!tf || !kf) return null;
+    if (tf === kf) return { score: 0.5, dist: 0 };
+    if (kf.length >= 4 && tf.indexOf(kf) >= 0) return { score: 1, dist: 0 };
+    var d = lev(tf, kf, false), rank = lev(tf, kf, true);
+    if (tf.length > kf.length + 1) {      // 前後黏了別的字（例如 PNK12VN003）：拿長度相近的片段比；排名時被丟掉的字每個算 0.4
       for (var len = kf.length - 1; len <= kf.length + 1; len++)
-        for (var s = 0; s + len <= tf.length; s++) best = Math.min(best, lev(tf.substr(s, len), kf) + 0.25);
+        for (var s = 0; s + len <= tf.length; s++) {
+          var sub = tf.substr(s, len);
+          d = Math.min(d, lev(sub, kf, false));
+          rank = Math.min(rank, lev(sub, kf, true) + 0.25 + 0.4 * (tf.length - len));
+        }
     }
-    return best <= maxD ? 1 + best : null;
+    return d <= OCR_MAX_DIST ? { score: 1 + rank, dist: d } : null;
   }
-  // texts：每一次辨識（不同縮放）的文字；同一料號取最好的分數，分數相同時被越多次辨識認到的排前面
-  function ocrCandidates(texts, sheet) {
-    if (!Array.isArray(texts)) texts = [texts];
-    var passes = texts.map(ocrTokens), res = [];
+  // passes：每一版前處理的辨識結果（字串，或 { text, conf }）。對清單每個料號取所有版本裡最好的分數；
+  // 分數相同時，被越多版本認到的排前面，再來是辨識信心高的版本。回傳前 3 名清單候選；清單裡完全沒有相近料號時，改列照片裡像料號的原始字串。
+  function ocrCandidates(passes, sheet) {
+    if (!Array.isArray(passes)) passes = [passes];
+    passes = passes.map(function (p) { return typeof p === 'string' ? { text: p, conf: null } : p; });
+    var toks = passes.map(function (p) { return ocrTokens(p.text); }), res = [];
     sheet.items.forEach(function (it, idx) {
       var best = null, hits = 0;
-      passes.forEach(function (toks) {
+      toks.forEach(function (ts, pi) {
         var pb = null;
-        toks.forEach(function (t) { var sc = scorePair(t, it.code); if (sc != null && (pb == null || sc < pb)) pb = sc; });
-        if (pb != null) { hits++; if (best == null || pb < best) best = pb; }
+        ts.forEach(function (t) { var sc = scorePair(t, it.code); if (sc && (!pb || sc.score < pb.score)) { pb = sc; pb.tok = t; } });
+        if (pb) { hits++; if (!best || pb.score < best.score || (pb.score === best.score && (passes[pi].conf || 0) > best.conf)) { best = pb; best.conf = passes[pi].conf || 0; } }
       });
-      if (best != null) res.push({ code: it.code, score: best, hits: hits, idx: idx, inSheet: true });
+      if (best) res.push({ code: it.code, score: best.score, dist: best.dist, tok: best.tok, hits: hits, conf: best.conf, idx: idx, inSheet: true });
     });
-    res.sort(function (a, b) { return a.score - b.score || b.hits - a.hits || a.idx - b.idx; });
+    res.sort(function (a, b) { return a.score - b.score || b.hits - a.hits || b.conf - a.conf || a.idx - b.idx; });
     res = res.slice(0, 3);
-    if (!res.length || res[0].score > 1) {
-      // 清單裡沒有夠像的（或沒匯入清單）：補上照片裡看起來像料號的字串。
+    if (!res.length || (!sheet.hasExpected && res[0].score > 1)) {
+      // 清單裡沒有相近的（或還沒匯入清單）：列照片裡看起來像料號的字串（OCR 原始讀數）。辨識信心高的版本優先。
       // 料號是英數混合：同時有英文和數字的優先，純數字（≥5 碼）其次，純英文（多半是別的字或雜訊）不列。
       var kind = function (t) { return /[A-Z]/.test(t) && /[0-9]/.test(t) ? 0 : /^[0-9-]{5,}$/.test(t) ? 1 : 9; };
+      var order = passes.map(function (p, i) { return i; }).sort(function (a, b) { return (passes[b].conf || 0) - (passes[a].conf || 0) || a - b; });
       var raw = [];
-      texts.forEach(function (tx) { ocrTokens(tx, true).forEach(function (t) {   // 這裡不用相鄰片段接起來的字串（容易拼出假料號）
+      order.forEach(function (pi) { ocrTokens(passes[pi].text, true).forEach(function (t) {   // 這裡不用相鄰片段接起來的字串（容易拼出假料號）
         if (kind(t) > 1) return;
         // 引擎常把數字串裡的 0 認成 O 或在 0 前多認一個 O：先列修正版，原字串也留著讓人選
         var fixed = t.replace(/O(?=0)/g, '').replace(/O(?=[0-9])/g, '0').replace(/([0-9])O/g, '$10');
         if (fixed !== t && fixed.length >= 4) raw.push(fixed);
         raw.push(t);
       }); });
-      raw.sort(function (a, b) { return kind(a) - kind(b); })   // 穩定排序：同類保持辨識順序
+      raw.sort(function (a, b) { return kind(a) - kind(b); })   // 穩定排序：同類保持信心高→低的順序
         .forEach(function (t) {
           if (res.length >= 3) return;
           if (res.some(function (r) { return r.code.toUpperCase() === t; })) return;
           if (findCodeCI(sheet, t)) return;
-          res.push({ code: t, score: 9, inSheet: false });
+          res.push({ code: t, score: 9, tok: t, inSheet: false });
         });
     }
     return res;
+  }
+  // 照片上最像料號的原始讀數（顯示給使用者看「OCR 讀到什麼」）
+  function ocrRawReading(passes, cands) {
+    if (cands.length && cands[0].tok) return cands[0].tok;
+    var c = ocrCandidates(passes, { items: [], hasExpected: false });
+    return c.length ? c[0].code : '';
   }
   function findCodeCI(sheet, code) {
     var u = code.toUpperCase();
@@ -1092,16 +1113,26 @@
       b.setAttribute('aria-pressed', String(b.getAttribute('data-code').toUpperCase() === v.toUpperCase()));
     });
   }
-  function showCandidates(texts) {
-    var sheet = current(), cands = ocrCandidates(texts, sheet);
-    lastOcr = { text: texts.join('\n---\n'), passes: texts.length, candidates: cands };
+  function showRaw(raw) {
+    var el = $('ocr-raw');
+    el.hidden = false;
+    el.innerHTML = 'OCR 讀到：' + (raw ? '<b>' + esc(raw) + '</b>' : '（沒有讀到像料號的英數字）');
+  }
+  function showCandidates(passes) {
+    var sheet = current(), cands = ocrCandidates(passes, sheet), raw = ocrRawReading(passes, cands);
+    var listCands = cands.filter(function (c) { return c.inSheet; });
+    var notFound = sheet.hasExpected && !listCands.length;   // 有匯入清單、但清單裡完全沒有相近料號
+    lastOcr = { text: passes.map(function (p) { return p.text; }).join('\n---\n'), passes: passes.length, variants: passes.map(function (p) { return p.variant + ':' + Math.round(p.conf || 0); }), raw: raw, notFound: notFound, candidates: cands };
+    showRaw(raw);
     $('ocr-cands').innerHTML = cands.map(function (c, i) {
-      var it = findItem(sheet, c.code);
+      var it = c.inSheet ? findItem(sheet, c.code) : null;
       return '<button class="cand" data-code="' + esc(c.code) + '" aria-pressed="false"><div class="c">' + (i + 1) + '. ' + esc(c.code) + '</div><div class="s">' +
         esc(it ? itemSummary(sheet, it) : '照片裡的字（不在' + (sheet.items.length ? '這張單' : '清單') + '）') + '</div></button>';
     }).join('');
-    $('ocr-code').value = cands.length ? cands[0].code : '';
-    if (cands.length) setOcrProgress('info', '辨識完成：請確認料號正確再按「確認計數」。認錯可點其他候選、直接改字或重拍。');
+    $('ocr-code').value = cands.length ? cands[0].code : raw;
+    if (listCands.length) setOcrProgress('info', '辨識完成：請確認料號正確再按「確認計數」。認錯可點其他候選、直接改字或重拍。');
+    else if (notFound && raw) setOcrProgress('err', '辨識完成，但查不到料號：清單裡沒有和「' + raw + '」相近的料號。\n請看照片核對後直接改字（不在清單會新增為「清單外」），或重拍。');
+    else if (cands.length) setOcrProgress('info', '辨識完成：請確認料號正確再按「確認計數」。認錯可直接改字或重拍。');
     else setOcrProgress('err', '沒有辨識出料號。請直接在下方輸入料號，或重拍（靠近一點、正對名牌、避免反光）。');
     ocrInfo();
     if (!cands.length) $('ocr-code').focus();
@@ -1114,18 +1145,180 @@
       img.src = ocrImgUrl;
     });
   }
-  // 手機原圖（3000–4000px）直接辨識很慢、而且字太大反而容易認錯：先縮到長邊 1000px 認一次，
-  // 沒有跟清單「完全相同」的結果時再用長邊 1600px 認第二次，兩次的結果合併排序。
-  var OCR_SIZES = [1000, 1600];
-  function canvasAt(img, longSide) {
-    var w = img.naturalWidth, h = img.naturalHeight, sc = Math.min(longSide / Math.max(w, h), 2);
-    var cv = document.createElement('canvas'); cv.width = Math.max(1, Math.round(w * sc)); cv.height = Math.max(1, Math.round(h * sc));
-    var cx = cv.getContext('2d'); cx.fillStyle = '#fff'; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(img, 0, 0, cv.width, cv.height);
-    return cv;
+
+  // ---------- v3.1：辨識前處理 ----------
+  // 1) 找出名牌文字的傾斜角度並轉正（±15° 內）2) 裁切到文字所在區塊 3) 放大（以長邊 1600px 的工作圖為準至少 2 倍，總像素有上限）
+  // 4) 產生三個版本各辨識一次：原圖、灰階＋拉高對比、自適應二值化（對反光、陰影較穩）。全部在手機本機 canvas 處理，不上傳。
+  var PREP = { work: 1600, ana: 1000, up: 2, maxCharH: 64, maxSide: 2600, maxPix: 3.2e6 };
+  function newCanvas(w, h) { var c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; }
+  function grayData(cv) {
+    var d = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height).data, g = new Float32Array(cv.width * cv.height);
+    for (var i = 0, j = 0; j < g.length; i += 4, j++) g[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    return g;
   }
-  function goodEnough(cands, sheet) {
-    if (!cands.length) return false;
-    return cands[0].inSheet ? cands[0].score === 0 : !sheet.items.length;
+  // 3×3 平均（壓掉感光噪點）
+  function blur3(g, w, h) {
+    var a = new Float32Array(g.length), o = new Float32Array(g.length), x, y, i;
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) { i = y * w + x; a[i] = (g[x > 0 ? i - 1 : i] + g[i] + g[x < w - 1 ? i + 1 : i]) / 3; }
+    for (y = 0; y < h; y++) for (x = 0; x < w; x++) { i = y * w + x; o[i] = (a[y > 0 ? i - w : i] + a[i] + a[y < h - 1 ? i + w : i]) / 3; }
+    return o;
+  }
+  // 自適應門檻（Bradley）：比周圍平均暗 t 以上、且至少暗 minD 灰階才算「墨」。用積分圖，反光／陰影造成的亮度不均不影響。
+  function adaptiveMask(g, w, h, win, t, minD) {
+    minD = minD || 0;
+    var I = new Float64Array((w + 1) * (h + 1)), x, y, r = Math.max(4, win >> 1), m = new Uint8Array(w * h);
+    for (y = 0; y < h; y++) { var rs = 0; for (x = 0; x < w; x++) { rs += g[y * w + x]; I[(y + 1) * (w + 1) + x + 1] = I[y * (w + 1) + x + 1] + rs; } }
+    for (y = 0; y < h; y++) {
+      var y0 = Math.max(0, y - r), y1 = Math.min(h, y + r + 1);
+      for (x = 0; x < w; x++) {
+        var x0 = Math.max(0, x - r), x1 = Math.min(w, x + r + 1);
+        var sum = I[y1 * (w + 1) + x1] - I[y0 * (w + 1) + x1] - I[y1 * (w + 1) + x0] + I[y0 * (w + 1) + x0];
+        var mean = sum / ((x1 - x0) * (y1 - y0)), v = g[y * w + x];
+        if (v < mean * (1 - t) && mean - v > minD) m[y * w + x] = 1;
+      }
+    }
+    return m;
+  }
+  // 原圖 → 縮放 f、以中心旋轉 -ang 後畫到 cv（cv 尺寸＝旋轉後外框）
+  function drawRotated(cx, img, f, ang, outW, outH) {
+    cx.save(); cx.translate(outW / 2, outH / 2); cx.rotate(-ang); cx.scale(f, f); cx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2); cx.restore();
+  }
+  function rotBox(w, h, ang) { var c = Math.abs(Math.cos(ang)), s = Math.abs(Math.sin(ang)); return { w: w * c + h * s, h: w * s + h * c }; }
+  // 傾斜角：把「墨」點投影到不同角度的水平線上，文字行對齊時投影最集中（平方和最大）
+  function estimateSkew(img) {
+    var iw = img.naturalWidth, ih = img.naturalHeight, f = Math.min(1, PREP.ana / Math.max(iw, ih));
+    var cv = newCanvas(iw * f, ih * f), cx = cv.getContext('2d'); cx.drawImage(img, 0, 0, cv.width, cv.height);
+    var w = cv.width, h = cv.height, m = adaptiveMask(blur3(grayData(cv), w, h), w, h, Math.round(Math.max(w, h) / 20), 0.12, 14), xs = [], ys = [], x, y;
+    for (y = 0; y < h; y += 1) for (x = 0; x < w; x += 1) if (m[y * w + x]) { xs.push(x - w / 2); ys.push(y - h / 2); }
+    if (xs.length < 50) return 0;
+    var H = Math.ceil(Math.hypot(w, h)) + 2;
+    function score(deg) {
+      var a = deg * Math.PI / 180, sn = Math.sin(a), cs = Math.cos(a), hist = new Float64Array(H), sc = 0, i;
+      for (i = 0; i < xs.length; i++) hist[Math.round(ys[i] * cs - xs[i] * sn + H / 2)]++;
+      for (i = 0; i < H; i++) sc += hist[i] * hist[i];
+      return sc;
+    }
+    var best = 0, bs = -1, d;
+    for (d = -15; d <= 15; d += 1) { var v = score(d); if (v > bs) { bs = v; best = d; } }
+    var b2 = best;
+    for (d = best - 0.75; d <= best + 0.751; d += 0.25) { var v2 = score(d); if (v2 > bs) { bs = v2; b2 = d; } }
+    return b2;
+  }
+  // 連通塊標記：回傳每塊的外框與像素數
+  function components(m, w, h) {
+    var lab = new Int32Array(w * h), comps = [], stack = [], n = 0, i;
+    for (i = 0; i < w * h; i++) {
+      if (!m[i] || lab[i]) continue;
+      n++; var c = { id: n, x0: w, y0: h, x1: 0, y1: 0, px: 0 }; stack.push(i); lab[i] = n;
+      while (stack.length) {
+        var p = stack.pop(), px = p % w, py = (p - px) / w; c.px++;
+        if (px < c.x0) c.x0 = px; if (px > c.x1) c.x1 = px; if (py < c.y0) c.y0 = py; if (py > c.y1) c.y1 = py;
+        if (px > 0 && m[p - 1] && !lab[p - 1]) { lab[p - 1] = n; stack.push(p - 1); }
+        if (px < w - 1 && m[p + 1] && !lab[p + 1]) { lab[p + 1] = n; stack.push(p + 1); }
+        if (py > 0 && m[p - w] && !lab[p - w]) { lab[p - w] = n; stack.push(p - w); }
+        if (py < h - 1 && m[p + w] && !lab[p + w]) { lab[p + w] = n; stack.push(p + w); }
+      }
+      comps.push(c);
+    }
+    return { comps: comps, lab: lab };
+  }
+  // 文字區塊：在轉正後的分析圖找「像字的連通塊」，把左右相鄰、高度相近的串成文字行，
+  // 取「字最多的那一行」以及上下鄰近的行（名牌上同一區塊的字），外框＋邊界。螺絲、框線、噪點會被排除。
+  function findTextBox(cv, minD) {
+    var w = cv.width, h = cv.height, g = blur3(grayData(cv), w, h);
+    var m = adaptiveMask(g, w, h, Math.round(Math.max(w, h) / 16), minD ? 0.06 : 0.12, minD || 16);
+    var comps = components(m, w, h).comps.filter(function (c) {
+      var cw = c.x1 - c.x0 + 1, ch = c.y1 - c.y0 + 1;
+      return ch >= 6 && ch <= h * 0.3 && cw <= ch * 10 && cw <= w * 0.5 && cw >= 2 && c.px >= 12 && c.px <= cw * ch * 0.95;   // 寬到 10 倍：模糊的小字會好幾個字黏成一塊
+    });
+    if (comps.length > 3000) return null;   // 雜點太多（例如整張很花）：不裁切
+    var par = comps.map(function (c, i) { return i; });
+    function root(i) { while (par[i] !== i) i = par[i] = par[par[i]]; return i; }
+    var deg = comps.map(function () { return 0; });
+    comps.sort(function (a, b) { return a.x0 - b.x0; });
+    for (var i = 0; i < comps.length; i++) {
+      var a = comps[i], ah = a.y1 - a.y0 + 1, acy = (a.y0 + a.y1) / 2;
+      for (var j = i + 1; j < comps.length; j++) {
+        var b = comps[j], bh = b.y1 - b.y0 + 1, mh = Math.max(ah, bh);
+        if (b.x0 - a.x1 > 1.5 * mh) { if (b.x0 - a.x1 > 1.5 * h * 0.3) break; continue; }
+        if (Math.abs((b.y0 + b.y1) / 2 - acy) < 0.5 * mh && bh < ah * 1.8 && ah < bh * 1.8) { par[root(i)] = root(j); deg[i]++; deg[j]++; }
+      }
+    }
+    var lines = {};
+    comps.forEach(function (c, i) {
+      if (!deg[i]) return;
+      var r = root(i), L = lines[r] || (lines[r] = { n: 0, x0: w, y0: h, x1: 0, y1: 0, hs: [] });
+      L.n++; L.x0 = Math.min(L.x0, c.x0); L.y0 = Math.min(L.y0, c.y0); L.x1 = Math.max(L.x1, c.x1); L.y1 = Math.max(L.y1, c.y1); L.hs.push(c.y1 - c.y0 + 1);
+    });
+    var ls = Object.keys(lines).map(function (k) { return lines[k]; }).filter(function (L) { return L.n >= 3; });
+    if (!ls.length) return null;
+    ls.forEach(function (L) { L.hs.sort(function (a, b) { return a - b; }); L.mh = L.hs[L.hs.length >> 1]; L.wt = L.n * L.mh; });
+    ls.sort(function (a, b) { return b.wt - a.wt; });
+    var top = ls[0], box = { x0: top.x0, y0: top.y0, x1: top.x1, y1: top.y1 }, changed = true;
+    var used = [top];
+    while (changed) {   // 往上下擴：與目前區塊垂直距離 ≤ 主行字高 3 倍、水平有重疊的行
+      changed = false;
+      ls.forEach(function (L) {
+        if (used.indexOf(L) >= 0) return;
+        var vgap = Math.max(L.y0 - box.y1, box.y0 - L.y1), hov = Math.min(L.x1, box.x1) - Math.max(L.x0, box.x0);
+        if (vgap < 3 * top.mh && hov > -top.mh) { used.push(L); changed = true; box.x0 = Math.min(box.x0, L.x0); box.y0 = Math.min(box.y0, L.y0); box.x1 = Math.max(box.x1, L.x1); box.y1 = Math.max(box.y1, L.y1); }
+      });
+    }
+    var mg = Math.max(8, top.mh * 1.2), mx = Math.max(12, top.mh * 2.5);   // 左右多留一些：行尾的字若沒串進來也不會被切掉
+    box.x0 = Math.max(0, box.x0 - mx); box.y0 = Math.max(0, box.y0 - mg); box.x1 = Math.min(w, box.x1 + mx); box.y1 = Math.min(h, box.y1 + mg);
+    return { x: box.x0, y: box.y0, w: box.x1 - box.x0, h: box.y1 - box.y0, charH: top.mh, n: used.reduce(function (a, L) { return a + L.n; }, 0) };
+  }
+  // 產生三個前處理版本（canvas）。回傳 { variants: [{ name, canvas }], info }
+  function prepareVariants(img) {
+    var iw = img.naturalWidth, ih = img.naturalHeight, ang = estimateSkew(img) * Math.PI / 180;
+    // 分析圖：轉正後長邊約 PREP.ana
+    var fa = Math.min(1, PREP.ana / Math.max(iw, ih)), ra = rotBox(iw * fa, ih * fa, ang);
+    var acv = newCanvas(ra.w, ra.h), ax = acv.getContext('2d'); ax.fillStyle = '#fff'; ax.fillRect(0, 0, acv.width, acv.height);
+    drawRotated(ax, img, fa, ang, acv.width, acv.height);
+    var box = findTextBox(acv) || findTextBox(acv, 8) || { x: 0, y: 0, w: acv.width, h: acv.height, charH: 0, n: 0 };   // 找不到就放寬門檻（淡字／反光）再找一次   // 找不到文字區：整張、不放大（放大整張雜訊只會更慢）
+    // 輸出：裁切區以長邊 1600 的工作圖為基準放大 PREP.up（2）倍。例外：
+    //   字本來就很大時，放大後字高最多 PREP.maxCharH（64px）——實測字高 >100px 加上感光噪點，引擎會把噪點顆粒當字，一張要 10–40 秒還認錯；
+    //   裁切區很大時，邊長／總像素上限（手機記憶體與速度）。
+    var fw = Math.min(1, PREP.work / Math.max(iw, ih)), k = fw / fa;           // 分析圖 → 工作圖 的倍率
+    var s = k * (box.n ? PREP.up : 1);                                          // 分析圖 → 輸出 的倍率
+    if (box.n && box.charH * s > PREP.maxCharH) s = PREP.maxCharH / box.charH;
+    s = Math.min(s, PREP.maxSide / Math.max(box.w, box.h), Math.sqrt(PREP.maxPix / (box.w * box.h)));
+    var ow = Math.round(box.w * s), oh = Math.round(box.h * s);
+    var base = newCanvas(ow, oh), bx = base.getContext('2d');
+    bx.fillStyle = '#fff'; bx.fillRect(0, 0, ow, oh); bx.imageSmoothingQuality = 'high';
+    bx.save(); bx.scale(s, s); bx.translate(-box.x, -box.y); drawRotated(bx, img, fa, ang, acv.width, acv.height); bx.restore();
+    // 灰階＋拉高對比：先輕微去噪（拉對比會把感光噪點一起放大，引擎會把噪點當字、變很慢），再取 2%／98% 亮度拉滿 0–255
+    var g = grayData(base), gs = blur3(blur3(g, ow, oh), ow, oh), hist = new Uint32Array(256), i;
+    for (i = 0; i < gs.length; i++) hist[gs[i] | 0]++;
+    var lo = 0, hi = 255, acc = 0;
+    for (i = 0; i < 256; i++) { acc += hist[i]; if (acc > g.length * 0.02) { lo = i; break; } }
+    acc = 0; for (i = 255; i >= 0; i--) { acc += hist[i]; if (acc > g.length * 0.02) { hi = i; break; } }
+    if (hi - lo < 16) { lo = 0; hi = 255; }
+    var con = newCanvas(ow, oh), cdat = bx.getImageData(0, 0, ow, oh), d = cdat.data;
+    for (i = 0; i < gs.length; i++) { var v = Math.max(0, Math.min(255, (gs[i] - lo) * 255 / (hi - lo))); d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v; d[i * 4 + 3] = 255; }
+    con.getContext('2d').putImageData(cdat, 0, 0);
+    // 自適應二值化：視窗約字高 3 倍
+    var charOut = box.charH ? box.charH * s : oh / 6;
+    var bm = adaptiveMask(gs, ow, oh, Math.round(Math.max(15, charOut * 3)), 0.1, 12);
+    var cc = components(bm, ow, oh), minPx = Math.max(6, charOut * charOut * 0.02), drop = {};   // 去掉比字的筆畫小很多的雜點
+    cc.comps.forEach(function (c) { if (c.px < minPx) drop[c.id] = 1; });
+    for (i = 0; i < bm.length; i++) if (bm[i] && drop[cc.lab[i]]) bm[i] = 0;
+    var bin = newCanvas(ow, oh), bdat = bin.getContext('2d').createImageData(ow, oh), e = bdat.data;
+    for (i = 0; i < bm.length; i++) { var bv = bm[i] ? 0 : 255; e[i * 4] = e[i * 4 + 1] = e[i * 4 + 2] = bv; e[i * 4 + 3] = 255; }
+    bin.getContext('2d').putImageData(bdat, 0, 0);
+    var variants = [{ name: '原圖', canvas: base }, { name: '灰階高對比', canvas: con }, { name: '二值化', canvas: bin }];
+    // 整張都找不到文字區時不跑二值化：整張有噪點的圖二值化後全是雜點，實測一張要 8–27 秒且讀不出東西
+    if (!box.n) variants.pop();
+    return {
+      variants: variants,
+      info: { skew: Math.round(ang * 1800 / Math.PI) / 10, crop: box.n ? Math.round(box.w * k) + '×' + Math.round(box.h * k) : '整張', out: ow + '×' + oh, scale: Math.round(s / k * 100) / 100, charH: Math.round(charOut) }
+    };
+  }
+  window.__inventory.prepareVariants = prepareVariants; // 測試用
+  // 三個版本都辨識完，用清單相似度挑最好的；只有在某個版本已經「跟清單料號完全相同」時才提早結束（不可能再更好，省手機時間）
+  function exactHit(passes, sheet) {
+    var c = ocrCandidates(passes, sheet);
+    return c.length && c[0].inSheet && c[0].score === 0;
   }
   function openOcrDialog() {
     $('ocr-dialog').hidden = false; document.body.style.overflow = 'hidden';
@@ -1142,19 +1335,23 @@
     if (ocrImgUrl) URL.revokeObjectURL(ocrImgUrl);
     ocrImgUrl = URL.createObjectURL(file);
     $('ocr-img').src = ocrImgUrl;
-    $('ocr-cands').innerHTML = ''; $('ocr-code').value = ''; lastOcr = null;
+    $('ocr-cands').innerHTML = ''; $('ocr-code').value = ''; $('ocr-raw').hidden = true; lastOcr = null;
     ocrInfo(); openOcrDialog(); ocrBusy = true;
     setOcrProgress('info', ocr.worker ? '⏳ 辨識文字中…' : '⏳ 載入辨識引擎…\n第一次使用需要網路下載辨識引擎（約 7MB），請稍候。');
     Promise.all([ensureEngine(), loadImg()]).then(function (r) {
-      var w = r[0], img = r[1], texts = [];
+      var w = r[0], img = r[1], passes = [], prep;
+      if (job !== ocrJob) return;
+      try { prep = prepareVariants(img); }
+      catch (e) { prep = { variants: [{ name: '原圖', canvas: (function () { var f = Math.min(1, PREP.work / Math.max(img.naturalWidth, img.naturalHeight)), c = newCanvas(img.naturalWidth * f, img.naturalHeight * f); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); return c; })() }], info: { error: String(e && e.message || e) } }; }
       function pass(i) {
         if (job !== ocrJob) return;
-        setOcrProgress('info', '⏳ 辨識文字中…' + (i ? '（換個大小再認一次）' : ''));
-        return w.recognize(canvasAt(img, OCR_SIZES[i])).then(function (out) {
+        setOcrProgress('info', '⏳ 辨識文字中…（' + (i + 1) + '／' + prep.variants.length + '：' + prep.variants[i].name + '）');
+        return w.recognize(prep.variants[i].canvas).then(function (out) {
           if (job !== ocrJob) return;
-          texts.push(out.data.text);
-          if (i + 1 < OCR_SIZES.length && !goodEnough(ocrCandidates(texts, current()), current())) return pass(i + 1);
-          ocrBusy = false; showCandidates(texts);
+          passes.push({ text: out.data.text, conf: out.data.confidence, variant: prep.variants[i].name });
+          if (i + 1 < prep.variants.length && !exactHit(passes, current())) return pass(i + 1);
+          ocrBusy = false; showCandidates(passes);
+          lastOcr.prep = prep.info;
         });
       }
       return pass(0);
